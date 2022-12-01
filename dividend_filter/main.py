@@ -1,87 +1,104 @@
 #!/usr/bin/env python3
-from cmath import isnan, nan
-from numpy import NaN
-from openpyxl import Workbook
 import pandas as pd
 import operator
+import os
+from shlex import split as ssplit
 
-def filter(param, value, op, do):
-	global df
-	global cursor
-	global ops
-	df.sort_values(by=param, ascending=False if op == operator.lt else True, inplace=True)
-	df.reset_index(drop=True, inplace=True)
-	for index, row in df.iterrows():
-		if op(row[param], value):
-			cursor = index
-			break
-	print("operation {}: deleting {} rows".format(ops, len(df) - len(df[:cursor])))
-	ops += 1
-	if do:
-		df = df[:cursor]
+UNFILTERED_DIR = "unfiltered"
+FILTERED_DIR = "filtered"
+OPERATORS = {
+    '<': operator.lt,
+    '<=': operator.le,
+    '>': operator.gt,
+    '>=': operator.ge,
+    '==': operator.eq,
+    '!=': operator.ne,
+}
+COLUMNS_TO_DELETE = [
+    "Seq", "DR", "SP", "Sch", "A/D*", "DEG", "Payout", "Factor", "Rule", "Graham",
+    "Annualized", "Price", "Month", "Own.", "$", "%",
+]
 
-def filter_condition(param, value, op, cond, cond_value, cond_op, do):
-	global df
-	global ops
-	counter = 0
-	df.sort_values(by=param, ascending=False, inplace=True)
-	df.reset_index(drop=True, inplace=True)
-	for index, row in df.iterrows():
-		if op(row[param], value):
-			if cond_op(row[cond], cond_value) == False:
-				if do:
-					df.drop(index, inplace= True)
-				counter += 1
-	print("operation {}: deleting {} rows".format(ops, counter))
-	ops += 1
+def sheet_filter(df: pd.DataFrame, domain, ops):
+    cursor = df.index[-1]
+    col, op, val = parse_domain(domain)
+    df.sort_values(by=col, ascending=False if op == operator.lt else True, inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    for index, row in df.iterrows():
+        if op(row[col], val):
+            cursor = index
+            break
+    range_to_drop = df.iloc[cursor:].index
+    print("operation {}: deleting {} rows".format(ops, len((range_to_drop))))
+    ops += 1
+    df.drop(range_to_drop, inplace=True)
 
-def find_end():
-	for index, row in df.iterrows():
-		if pd.isnull(row['Yield']):
-			return index
+def sheet_filter_condition(df: pd.DataFrame, domain, condition, ops):
+    column, op, value = parse_domain(domain)
+    cond_col, cond_op, cond_val = parse_domain(condition)
+    df.sort_values(by=column, ascending=False, inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    to_drop = []
+    for index, row in df.iterrows():
+        if op(row[column], value) and cond_op(row[cond_col], cond_val):
+            to_drop += index
+    print("operation {}: deleting {} rows".format(ops, len(to_drop)))
+    ops += 1
+    df.drop(df.index[to_drop], inplace=True)
 
-def prep_table():
-	global df
-	del df['Seq']
-	del df['DR']
-	del df['SP']
-	del df['Sch']
-	del df['A/D*']
-	del df['DEG']
-	del df['Payout']
-	del df['Factor']
-	del df['Rule']
-	del df['Graham']
-	del df["Annualized"]
-	del df["Price"]
-	del df["Month"]
-	del df["Own."]
-	del df['$']
-	del df['%']
-	df = df[:find_end()]
-	for index, row in df.iterrows():
-		if isnan(row['Equity']):
-			df.iloc[index] = 0.0
+def prep_table(df: pd.DataFrame):
+    for col in COLUMNS_TO_DELETE:
+        df.drop(col, inplace=True, axis=1)
 
-if __name__ == '__main__':
-	src = 'test.xlsx'
-	dest = Workbook('dest.xlsx')
-	cursor = 0
-	ops = 0
-	df = pd.read_excel(src, sheet_name='All CCC', header=5)
-	writer = pd.ExcelWriter('dest.xlsx', engine = 'openpyxl')
-	prep_table()
+def get_doc_pairs():
+    cwd = os.getcwd()
+    src_dir = os.sep.join([cwd, UNFILTERED_DIR])
+    dest_dir = os.sep.join([cwd, FILTERED_DIR])
+    xlsx_files = filter(lambda f: f.split('.')[-1] == 'xlsx', os.listdir(src_dir))
+    src_docs = []
+    dest_docs = []
+    for f in xlsx_files:
+        src_docs.append(os.sep.join([src_dir, f]))
+        dest_docs.append(os.sep.join([dest_dir, "-".join(f.split('-')[:-1])]) + ".xlsx")
+    return zip(src_docs, dest_docs)
 
-	filter('1-yr',   7.5000000,   operator.lt, True)
-	filter('Yield',  2.000000,	  operator.lt, True)
-	filter('10-yr',  7.5000000,   operator.lt, True)
-	filter('Equity', 1.00,		  operator.gt, True)
-	filter('ROE',	 10.000000,   operator.lt, True)
-	filter('($Mil)', 1000.000000, operator.lt, True)
-	filter('3-yr',   7.5000000,   operator.lt, True)
-	filter('5-yr',   7.5000000,   operator.lt, True)
-	filter_condition('Payout.1', 75.000000, operator.gt, 'Industry', 'Equity Real Estate Investment Trusts (REITs)', operator.eq, True)
-	df.sort_values(by='Yield', ascending=False, inplace=True)
+def init_setup():
+    os.makedirs(os.sep.join([os.getcwd(), FILTERED_DIR]), exist_ok=True)
+    os.makedirs(os.sep.join([os.getcwd(), UNFILTERED_DIR]), exist_ok=True)
 
-	df.to_excel(writer, sheet_name = 'final')
-	writer.close()
+def parse_domain(domain: str):
+    elements = ssplit(domain)
+    if not len(elements) == 3:
+        return None
+    try:
+        elements[2] = float(elements[2])
+    except ValueError:
+        elements[2] = str(elements[2].strip("'"))
+    return (
+        elements[0],
+        OPERATORS[elements[1]],
+        elements[2],
+    )
+
+
+if __name__ == "__main__":
+    init_setup()
+    docs = get_doc_pairs()
+    for doc in docs:
+        cursor = 0
+        ops = 0
+        df = pd.read_excel(doc[0], sheet_name="All CCC", header=5)
+        prep_table(df)
+        with pd.ExcelWriter(doc[1], engine="openpyxl") as writer:
+            sheet_filter(df, "1-yr < 7.500", ops)
+            sheet_filter(df, "Yield < 2.00", ops)
+            sheet_filter(df, "10-yr < 7.500", ops)
+            sheet_filter(df, "Equity > 1.00", ops)
+            sheet_filter(df, "ROE < 10.00", ops)
+            sheet_filter(df, "($Mil) < 1000.00", ops)
+            sheet_filter(df, "3-yr < 7.500", ops)
+            sheet_filter(df, "5-yr < 7.500", ops)
+            sheet_filter_condition(df, "Payout.1 > 75.00", "Industry != 'Equity Real Estate Investment Trusts (REITs)'", ops)
+            df.sort_values(by="Yield", ascending=False, inplace=True)
+            df.reset_index(drop=True, inplace=True)
+            df.to_excel(writer, sheet_name="final")
